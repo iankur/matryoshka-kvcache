@@ -14,19 +14,19 @@ from llmfoundry.models.mpt.modeling_mpt import gen_attention_mask_in_length, gen
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 
-def maytroskha_key_value(self, key, value, prev_layer_key_value):
+def matryoshka_key_value(self, key, value, prev_layer_key_value):
     """
     Concatenate key and value with previous key and value
     after positional encoding has been applied. Take the
-    first `maytroskha_dim` dimensions of the concatenated
+    first `matryoshka_dim` dimensions of the concatenated
     key and value to be the new key and value. It adds two
-    new parameters `maytroskha_depth` and `block_idx`
+    new parameters `matryoshka_depth` and `block_idx`
     """
     assert len(key.shape) == 3
     bsz, seqlen = key.shape[:2]
-    maytroskha_dim = self.head_dim // (2 ** (self.block_idx % self.maytroskha_depth))
+    matryoshka_dim = self.head_dim // (2 ** (self.block_idx % self.matryoshka_depth))
 
-    if maytroskha_dim == self.head_dim:
+    if matryoshka_dim == self.head_dim:
         return key, value
 
     prev_key, prev_value = prev_layer_key_value
@@ -34,10 +34,10 @@ def maytroskha_key_value(self, key, value, prev_layer_key_value):
     prev_value = prev_value.view(-1, self.head_dim)
 
     key = key.view(-1, self.head_dim)
-    key = key[..., :maytroskha_dim]
+    key = key[..., :matryoshka_dim]
 
     value = value.view(-1, self.head_dim)
-    value = value[..., :maytroskha_dim]
+    value = value[..., :matryoshka_dim]
 
     key = torch.cat([key, prev_key], dim=-1)
     value = torch.cat([value, prev_value], dim=-1)
@@ -79,8 +79,8 @@ def forward(
             value,
         )
 
-    if self.maytroskha_depth > 0:
-        key, value = self.maytroskha_key_value(key, value, prev_layer_key_value)
+    if self.matryoshka_depth > 0:
+        key, value = self.matryoshka_key_value(key, value, prev_layer_key_value)
 
     extra_attn_kwargs = self.get_implementation_specific_args(
         attention_mask,
@@ -321,7 +321,7 @@ class MPTModel(OriginalMPTModel):
                     )
                 prev_layer_key_value = layer_kv_cache_dict[
                     attn_block.reuse_kv_layer_idx]
-            elif attn_block.mytroskha_depth > 0:
+            elif attn_block.matryoshka_depth > 0:
                 prev_layer_key_value = layer_kv_cache_dict.get(b_idx - 1, None)
             else:
                 prev_layer_key_value = None
@@ -348,7 +348,7 @@ class MPTModel(OriginalMPTModel):
             )
             if presents is not None:
                 presents += (present,)
-            if b_idx in self.kv_cache_layers or attn_block.mytroskha_depth > 0:
+            if b_idx in self.kv_cache_layers or attn_block.matryoshka_depth > 0:
                 layer_kv_cache_dict[b_idx] = [
                     present[0][:, past_position:],
                     present[1][:, past_position:],
@@ -385,10 +385,10 @@ class ComposerMPTCausalLM(OriginalComposerMPTCausalLM):
         return MPTForCausalLM
 
 
-attn_config_defaults['mytroskha_depth'] = 0
+attn_config_defaults['matryoshka_depth'] = 0
 llmfoundry.models.utils.config_defaults.attn_config_defaults = attn_config_defaults
 llmfoundry.models.layers.attention.GroupedQueryAttention.forward = forward
-llmfoundry.models.layers.attention.GroupedQueryAttention.maytroskha_key_value = maytroskha_key_value
+llmfoundry.models.layers.attention.GroupedQueryAttention.matryoshka_key_value = matryoshka_key_value
 llmfoundry.registry.models.register('mpt_causal_lm', func=ComposerMPTCausalLM)
 
 
