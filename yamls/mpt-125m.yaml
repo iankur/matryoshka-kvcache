@@ -22,7 +22,8 @@ model:
   vocab_size: 50368
   attn_config:
     attn_impl: flash
-    matryoshka_depth: 0
+    rope: True
+  matryoshka_depth: 0
 
 # Tokenizer
 tokenizer:
@@ -84,8 +85,8 @@ global_train_batch_size: 256
 # System
 seed: ${variables.global_seed}
 device_eval_batch_size: 16
-device_train_microbatch_size: 16
-# device_train_microbatch_size: auto
+# device_train_microbatch_size: 16
+device_train_microbatch_size: auto
 precision: amp_bf16
 
 # FSDP
@@ -110,7 +111,7 @@ callbacks:
   runtime_estimator: {}
 
 loggers:
-  wandb: {}
+  wandb: {'project': 'mkv'}
 
 # Checkpoint to local filesystem or remote object store
 # save_interval: 500ba

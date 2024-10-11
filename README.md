@@ -13,7 +13,7 @@ cd llm-foundry
 python3 -m venv llmfoundry-venv
 source llmfoundry-venv/bin/activate
 
-pip install cmake packaging torch  # setup.py requires these be installed
+pip install cmake packaging torch wheel  # setup.py requires these be installed
 
 pip install -e ".[gpu]"  # or `pip install -e .` if no NVIDIA GPU.
 ```
@@ -31,5 +31,5 @@ python ../llm-foundry/scripts/data_prep/convert_dataset_hf.py --dataset allenai/
 
 ### Train
 ```
-composer train.py yamls/pretrain/mpt-125m.yaml train_loader.dataset.split=train_small eval_loader.dataset.split=val_small
+composer train.py yamls/mpt-125m.yaml train_loader.dataset.split=train_small eval_loader.dataset.split=val_small
 ```
