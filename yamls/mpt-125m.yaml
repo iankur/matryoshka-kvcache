@@ -5,20 +5,38 @@ variables:
   global_seed: 17
 
   # Run Name
-  run_name:  # If left blank, will be read from env var $RUN_NAME
+  run_name: mkv # If left blank, will be read from env var $RUN_NAME
 
   order:
     # standard
-    standard: {}
+    standard:
+      order:
+        - name: default
+      repeat: 12
 
     # cross layer attention with 2 shared layers
-    cla2: {order: [{name: default}, {name: reuse_kv_layer}], repeat: 12}
+    cla2:
+      order:
+        - name: default
+        - name: reuse_kv_layer
+      repeat: 6 # 12
 
     # cross layer attention with 4 shared layers
-    cla4: {order: [{name: default}, {name: reuse_kv_layer, repeat: 3}], repeat: 6}
+    cla4:
+      order:
+        - name: default
+        - {name: reuse_kv_layer, repeat: 3}
+      repeat: 3
 
     # matryoshka
-    mkv: {order: [{name: matryoshka_layer1}, {name: matryoshka_layer2}, {name: matryoshka_layer4}, {name: matryoshka_layer8}], repeat: 6}
+    use_cache: True
+    mkv:
+      order:
+        - name: matryoshka_layer1
+        - name: matryoshka_layer2
+        - name: matryoshka_layer4
+        - name: matryoshka_layer8
+      repeat: 3
 
     # matryoshka with cross layer attention (2 shared layers)
     mkv_cla: {order: [{name: matryoshka_layer1}, {name: reuse_kv_layer},
@@ -43,6 +61,8 @@ model:
     attn_impl: flash
     rope: True
 
+  use_cache: ${variables.order.use_cache}
+
   block_overrides:
     overrides:
       reuse_kv_layer:
@@ -51,26 +71,21 @@ model:
       matryoshka_layer1:
         attn_config:
           matryoshka_factor: 1
-        use_cache: True
       matryoshka_layer2:
         attn_config:
           matryoshka_factor: 2
-        use_cache: True
       matryoshka_layer4:
         attn_config:
           matryoshka_factor: 4
-        use_cache: True
       matryoshka_layer8:
         attn_config:
           matryoshka_factor: 8
-        use_cache: True
-    order: [
-      ${variables.order.standard},
-      # ${variables.order.cla2},
-      # ${variables.order.cla4},
-      # ${variables.order.mkv},
+    order:
+      # - ${variables.order.standard}
+      # - ${variables.order.cla2}
+      # - ${variables.order.cla4}
+      - ${variables.order.mkv}
       # ${variables.order.mkv_cla},
-    ]
 
 # Tokenizer
 tokenizer:

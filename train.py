@@ -1,17 +1,19 @@
 import copy
 import warnings
-from typing import Optional
+from typing import Optional, Any
 
 import llmfoundry
 import torch
 import torch.nn as nn
 
+from llmfoundry.layers_registry import attention_classes
 from llmfoundry.models.layers.attention import gen_slopes, GroupedQueryAttention as OriginalGroupedQueryAttention
 from llmfoundry.models.layers.layer_builders import build_fc
 from llmfoundry.models.mpt import (
     ComposerMPTCausalLM as OriginalComposerMPTCausalLM,
     MPTForCausalLM as OriginalMPTForCausalLM,
     MPTModel as OriginalMPTModel,
+    MPTConfig as OriginalMPTConfig,
 )
 from llmfoundry.models.mpt.modeling_mpt import (
     gen_attention_mask_in_length,
@@ -22,10 +24,65 @@ from llmfoundry.models.utils.config_defaults import fc_type_defaults
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 
+class MPTConfig(OriginalMPTConfig):
+    @property
+    def allowed_block_overrides(self):
+        return {
+            'attn_config': {
+                'sliding_window_size': None,
+                'reuse_kv_layer_idx': None,
+                'matryoshka_factor': 1,
+            },
+        }
+llmfoundry.models.mpt.MPTConfig = MPTConfig
+
+@attention_classes.register_class("grouped_query_attention")
 class GroupedQueryAttention(OriginalGroupedQueryAttention):
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        kv_n_heads: int,
+        attn_impl: str = 'flash',
+        clip_qkv: Optional[float] = None,
+        qk_ln: bool = False,
+        qk_gn: bool = False,
+        fused_qkv: bool = True,
+        softmax_scale: Optional[float] = None,
+        attn_pdrop: float = 0.0,
+        norm_type: str = 'low_precision_layernorm',
+        norm_eps: float = 1e-05,
+        fc_type: Optional[dict[str, Any]] = None,
+        device: Optional[str] = None,
+        bias: bool = True,
+        sliding_window_size: int = -1,
+        reuse_kv_layer_idx: Optional[int] = None,
+        attn_logit_softcapping: Optional[float] = None,
+        kv_dim: Optional[int] = None,
+        **kwargs,
+    ):
         self.matryoshka_factor = kwargs.pop("matryoshka_factor", 1)
-        super().__init__(*args, **kwargs)
+        super().__init__(
+        d_model=d_model,
+        n_heads=n_heads,
+        kv_n_heads=kv_n_heads,
+        attn_impl=attn_impl,
+        clip_qkv=clip_qkv,
+        qk_ln=qk_ln,
+        qk_gn=qk_gn,
+        fused_qkv=fused_qkv,
+        softmax_scale=softmax_scale,
+        attn_pdrop=attn_pdrop,
+        norm_type=norm_type,
+        norm_eps=norm_eps,
+        fc_type=fc_type,
+        device=device,
+        bias=bias,
+        sliding_window_size=sliding_window_size,
+        reuse_kv_layer_idx=reuse_kv_layer_idx,
+        attn_logit_softcapping=attn_logit_softcapping,
+        kv_dim=kv_dim,
+        )
 
         # Usually, fc_type dict should be passed in through MPTBlock's __init__ function.
         if fc_type is None:
@@ -143,6 +200,100 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
         value = value[..., : self.head_dim].reshape(bsz, seqlen, -1)
         return key, value
 
+@attention_classes.register_class('multihead_attention')
+class MultiheadAttention(GroupedQueryAttention):
+    """Multi-head self attention.
+
+    Using torch attention implementation enables user to also use additive bias.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        attn_impl: str = 'flash',
+        clip_qkv: Optional[float] = None,
+        qk_ln: bool = False,
+        qk_gn: bool = False,
+        fused_qkv: bool = True,
+        softmax_scale: Optional[float] = None,
+        attn_pdrop: float = 0.0,
+        norm_type: str = 'low_precision_layernorm',
+        norm_eps: float = 1e-05,
+        fc_type: Optional[dict[str, Any]] = None,
+        device: Optional[str] = None,
+        bias: bool = True,
+        sliding_window_size: int = -1,
+        reuse_kv_layer_idx: Optional[int] = None,
+        attn_logit_softcapping: Optional[float] = None,
+        kv_dim: Optional[int] = None,
+    ):
+        super().__init__(
+            d_model=d_model,
+            n_heads=n_heads,
+            kv_n_heads=n_heads,  # for MHA, same # heads as kv groups
+            attn_impl=attn_impl,
+            clip_qkv=clip_qkv,
+            qk_ln=qk_ln,
+            qk_gn=qk_gn,
+            fused_qkv=fused_qkv,
+            softmax_scale=softmax_scale,
+            attn_pdrop=attn_pdrop,
+            norm_type=norm_type,
+            norm_eps=norm_eps,
+            fc_type=fc_type,
+            device=device,
+            bias=bias,
+            sliding_window_size=sliding_window_size,
+            reuse_kv_layer_idx=reuse_kv_layer_idx,
+            attn_logit_softcapping=attn_logit_softcapping,
+            kv_dim=kv_dim,
+        )
+
+@attention_classes.register_class('multiquery_attention')
+class MultiQueryAttention(GroupedQueryAttention):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        attn_impl: str = 'flash',
+        clip_qkv: Optional[float] = None,
+        qk_ln: bool = False,
+        qk_gn: bool = False,
+        fused_qkv: bool = True,
+        softmax_scale: Optional[float] = None,
+        attn_pdrop: float = 0.0,
+        norm_type: str = 'low_precision_layernorm',
+        norm_eps: float = 1e-05,
+        fc_type: Optional[dict[str, Any]] = None,
+        device: Optional[str] = None,
+        bias: bool = True,
+        sliding_window_size: int = -1,
+        reuse_kv_layer_idx: Optional[int] = None,
+        attn_logit_softcapping: Optional[float] = None,
+        kv_dim: Optional[int] = None,
+    ):
+        super().__init__(
+            d_model=d_model,
+            n_heads=n_heads,
+            kv_n_heads=1,  # for MQA, 1 head
+            attn_impl=attn_impl,
+            clip_qkv=clip_qkv,
+            qk_ln=qk_ln,
+            qk_gn=qk_gn,
+            fused_qkv=fused_qkv,
+            softmax_scale=softmax_scale,
+            attn_pdrop=attn_pdrop,
+            norm_type=norm_type,
+            norm_eps=norm_eps,
+            fc_type=fc_type,
+            device=device,
+            bias=bias,
+            sliding_window_size=sliding_window_size,
+            reuse_kv_layer_idx=reuse_kv_layer_idx,
+            attn_logit_softcapping=attn_logit_softcapping,
+            kv_dim=kv_dim,
+        )
 
 class MPTModel(OriginalMPTModel):
     def forward(
@@ -414,7 +565,7 @@ class ComposerMPTCausalLM(OriginalComposerMPTCausalLM):
 
 
 llmfoundry.models.layers.attention.GroupedQueryAttention = GroupedQueryAttention
-llmfoundry.layers_registry.attention_classes.register_class("grouped_query_attention", GroupedQueryAttention)
+# llmfoundry.layers_registry.attention_classes.register_class("grouped_query_attention", GroupedQueryAttention)
 llmfoundry.registry.models.register("mpt_causal_lm", func=ComposerMPTCausalLM)
 
 
