@@ -7,6 +7,25 @@ variables:
   # Run Name
   run_name:  # If left blank, will be read from env var $RUN_NAME
 
+  order:
+    # standard
+    standard: {}
+
+    # cross layer attention with 2 shared layers
+    cla2: {order: [{name: default}, {name: reuse_kv_layer}], repeat: 12}
+
+    # cross layer attention with 4 shared layers
+    cla4: {order: [{name: default}, {name: reuse_kv_layer, repeat: 3}], repeat: 6}
+
+    # matryoshka
+    mkv: {order: [{name: matryoshka_layer1}, {name: matryoshka_layer2}, {name: matryoshka_layer4}, {name: matryoshka_layer8}], repeat: 6}
+
+    # matryoshka with cross layer attention (2 shared layers)
+    mkv_cla: {order: [{name: matryoshka_layer1}, {name: reuse_kv_layer},
+               {name: matryoshka_layer2}, {name: reuse_kv_layer},
+               {name: matryoshka_layer4}, {name: reuse_kv_layer},
+               {name: matryoshka_layer8}, {name: reuse_kv_layer}], repeat: 3}
+
 max_seq_len: ${variables.max_seq_len}
 run_name: ${variables.run_name}
 
@@ -23,7 +42,35 @@ model:
   attn_config:
     attn_impl: flash
     rope: True
-  matryoshka_depth: 0
+
+  block_overrides:
+    overrides:
+      reuse_kv_layer:
+        attn_config:
+          reuse_kv_layer_idx: -1
+      matryoshka_layer1:
+        attn_config:
+          matryoshka_factor: 1
+        use_cache: True
+      matryoshka_layer2:
+        attn_config:
+          matryoshka_factor: 2
+        use_cache: True
+      matryoshka_layer4:
+        attn_config:
+          matryoshka_factor: 4
+        use_cache: True
+      matryoshka_layer8:
+        attn_config:
+          matryoshka_factor: 8
+        use_cache: True
+    order: [
+      ${variables.order.standard},
+      # ${variables.order.cla2},
+      # ${variables.order.cla4},
+      # ${variables.order.mkv},
+      # ${variables.order.mkv_cla},
+    ]
 
 # Tokenizer
 tokenizer:

@@ -1,12 +1,13 @@
+import copy
 import warnings
 from typing import Optional
 
 import llmfoundry
-
 import torch
 import torch.nn as nn
 
-from llmfoundry.models.layers.attention import gen_slopes
+from llmfoundry.models.layers.attention import gen_slopes, GroupedQueryAttention as OriginalGroupedQueryAttention
+from llmfoundry.models.layers.layer_builders import build_fc
 from llmfoundry.models.mpt import (
     ComposerMPTCausalLM as OriginalComposerMPTCausalLM,
     MPTForCausalLM as OriginalMPTForCausalLM,
@@ -16,119 +17,134 @@ from llmfoundry.models.mpt.modeling_mpt import (
     gen_attention_mask_in_length,
     gen_flash_attn_padding_info,
 )
+from llmfoundry.models.utils.config_defaults import fc_type_defaults
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 
-def matryoshka_key_value(self, key, value, prev_layer_key_value):
-    """
-    Concatenate key and value with previous key and value
-    after positional encoding has been applied. Take the
-    first `matryoshka_dim` dimensions of the concatenated
-    key and value to be the new key and value. It adds two
-    new parameters `matryoshka_depth` and `block_idx`
-    """
-    assert len(key.shape) == 3
-    bsz, seqlen = key.shape[:2]
-    matryoshka_dim = self.head_dim // (2 ** (self.block_idx % self.matryoshka_depth))
+class GroupedQueryAttention(OriginalGroupedQueryAttention):
+    def __init__(self, *args, **kwargs):
+        self.matryoshka_factor = kwargs.pop("matryoshka_factor", 1)
+        super().__init__(*args, **kwargs)
 
-    if matryoshka_dim == self.head_dim:
-        return key, value
+        # Usually, fc_type dict should be passed in through MPTBlock's __init__ function.
+        if fc_type is None:
+            fc_type = copy.deepcopy(fc_type_defaults)
+            fc_type['bias'] = kwargs.get('bias', True)
+            fc_type['device'] = kwargs.get('device', None)
+        fc_type_name = fc_type['name']
 
-    prev_key, prev_value = prev_layer_key_value
-    prev_key = prev_key.reshape(-1, self.head_dim)
-    prev_value = prev_value.reshape(-1, self.head_dim)
+        if self.matryoshka_factor > 1:
+            assert self.fused_qkv, "Fused qkv must be enabled"
+            self.Wqkv = build_fc(
+                name=fc_type_name,
+                in_features=self.d_model,
+                out_features=self.d_model + 2 * self.kv_n_heads * self.head_dim // self.matryoshka_factor,
+                fc_kwargs=fc_type,
+            )
+            # for param init fn; enables shape based init of fused layers
+            fuse_splits = [i * self.head_dim for i in range(1, self.n_heads + 1)] + [
+                self.n_heads * self.head_dim + i * self.head_dim // self.matryoshka_factor
+                for i in range(1, 2 * self.kv_n_heads)
+            ]
+            self.Wqkv._fused = (0, fuse_splits)
 
-    key = key.reshape(-1, self.head_dim)
-    key = key[..., :matryoshka_dim]
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        attn_bias: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        rotary_emb_w_meta_info: Optional[dict] = None,
+        is_causal: bool = True,
+        needs_weights: bool = False,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        flash_attn_padding_info: Optional[dict[str, torch.Tensor]] = None,
+        prev_layer_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        key_value_states: Optional[torch.Tensor] = None,
+    ) -> tuple[
+        torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor, torch.Tensor]]
+    ]:
+        extra_kwargs = {}
+        if prev_layer_key_value is not None:
+            extra_kwargs["prev_layer_key_value"] = prev_layer_key_value
+        query, key, value = self.get_qkv(
+            x=x,
+            key_value_states=key_value_states,
+            **extra_kwargs,
+        )
 
-    value = value.reshape(-1, self.head_dim)
-    value = value[..., :matryoshka_dim]
+        if rotary_emb_w_meta_info is not None:
+            query, key, value = self._apply_rotary_embeddings(
+                rotary_emb_w_meta_info,
+                query,
+                key,
+                value,
+            )
 
-    key = torch.cat([key, prev_key], dim=-1)
-    value = torch.cat([value, prev_value], dim=-1)
+        if self.matryoshka_factor > 1:
+            key, value = self.matryoshka_key_value(key, value, prev_layer_key_value)
 
-    key = key[..., : self.head_dim].reshape(bsz, seqlen, -1)
-    value = value[..., : self.head_dim].reshape(bsz, seqlen, -1)
-    return key, value
+        extra_attn_kwargs = self.get_implementation_specific_args(
+            attention_mask,
+            alibi_slopes,
+            flash_attn_padding_info,
+        )
 
-
-def forward(
-    self,
-    x: torch.Tensor,
-    past_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    attn_bias: Optional[torch.Tensor] = None,
-    attention_mask: Optional[torch.Tensor] = None,
-    rotary_emb_w_meta_info: Optional[dict] = None,
-    is_causal: bool = True,
-    needs_weights: bool = False,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    flash_attn_padding_info: Optional[dict[str, torch.Tensor]] = None,
-    prev_layer_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    key_value_states: Optional[torch.Tensor] = None,
-) -> tuple[
-    torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor, torch.Tensor]]
-]:
-    extra_kwargs = {}
-    if prev_layer_key_value is not None:
-        extra_kwargs["prev_layer_key_value"] = prev_layer_key_value
-    query, key, value = self.get_qkv(
-        x=x,
-        key_value_states=key_value_states,
-        **extra_kwargs,
-    )
-
-    if rotary_emb_w_meta_info is not None:
-        query, key, value = self._apply_rotary_embeddings(
-            rotary_emb_w_meta_info,
+        context, attn_weights, past_key_value = self.attn_fn(
             query,
             key,
             value,
+            n_heads=self.n_heads,
+            kv_n_heads=self.kv_n_heads,
+            past_key_value=past_key_value,
+            softmax_scale=self.softmax_scale,
+            attn_bias=attn_bias,
+            is_causal=is_causal,
+            dropout_p=self.attn_dropout_p,
+            training=self.training,
+            needs_weights=needs_weights,
+            attn_logit_softcapping=self.attn_logit_softcapping,
+            sliding_window_size=self.sliding_window_size,
+            **extra_attn_kwargs,
         )
 
-    if self.matryoshka_depth > 0:
-        key, value = self.matryoshka_key_value(key, value, prev_layer_key_value)
+        return self.out_proj(context), attn_weights, past_key_value
 
-    extra_attn_kwargs = self.get_implementation_specific_args(
-        attention_mask,
-        alibi_slopes,
-        flash_attn_padding_info,
-    )
+    def matryoshka_key_value(self, key, value, prev_layer_key_value):
+        """
+        Concatenate key and value with previous key and value
+        after positional encoding has been applied. Take the
+        first `matryoshka_dim` dimensions of the concatenated
+        key and value to be the new key and value. It adds two
+        new parameters `matryoshka_factor` and `block_idx`
+        """
+        assert len(key.shape) == 3
+        bsz, seqlen = key.shape[:2]
+        matryoshka_dim = self.head_dim // self.matryoshka_factor
 
-    context, attn_weights, past_key_value = self.attn_fn(
-        query,
-        key,
-        value,
-        n_heads=self.n_heads,
-        kv_n_heads=self.kv_n_heads,
-        past_key_value=past_key_value,
-        softmax_scale=self.softmax_scale,
-        attn_bias=attn_bias,
-        is_causal=is_causal,
-        dropout_p=self.attn_dropout_p,
-        training=self.training,
-        needs_weights=needs_weights,
-        attn_logit_softcapping=self.attn_logit_softcapping,
-        sliding_window_size=self.sliding_window_size,
-        **extra_attn_kwargs,
-    )
+        if matryoshka_dim == self.head_dim:
+            return key, value
 
-    return self.out_proj(context), attn_weights, (key, value)
+        prev_key, prev_value = prev_layer_key_value
+        prev_key = prev_key.reshape(-1, self.head_dim)
+        prev_value = prev_value.reshape(-1, self.head_dim)
+
+        key = key.reshape(-1, self.head_dim)
+        key = key[..., :matryoshka_dim]
+
+        value = value.reshape(-1, self.head_dim)
+        value = value[..., :matryoshka_dim]
+
+        key = torch.cat([key, prev_key], dim=-1)
+        value = torch.cat([value, prev_value], dim=-1)
+
+        key = key[..., : self.head_dim].reshape(bsz, seqlen, -1)
+        value = value[..., : self.head_dim].reshape(bsz, seqlen, -1)
+        return key, value
 
 
 class MPTModel(OriginalMPTModel):
-    def __init__(self, config):
-        super().__init__(config)
-
-        for i, block in enumerate(self.blocks):
-            attn_block = (
-                block.norm_attn_norm.attn
-                if self.blocks_fuse_norm_attn_norm
-                else block.attn
-            )
-            attn_block.block_idx = i
-            attn_block.matryoshka_depth = config.get("matryoshka_depth", 0)
-
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -333,7 +349,7 @@ class MPTModel(OriginalMPTModel):
                 prev_layer_key_value = layer_kv_cache_dict[
                     attn_block.reuse_kv_layer_idx
                 ]
-            elif attn_block.matryoshka_depth > 0:
+            elif attn_block.matryoshka_factor > 1:
                 prev_layer_key_value = layer_kv_cache_dict.get(b_idx - 1, None)
             else:
                 prev_layer_key_value = None
@@ -360,7 +376,7 @@ class MPTModel(OriginalMPTModel):
             )
             if presents is not None:
                 presents += (present,)
-            if b_idx in self.kv_cache_layers or attn_block.matryoshka_depth > 0:
+            if b_idx in self.kv_cache_layers:
                 layer_kv_cache_dict[b_idx] = [
                     present[0][:, past_position:],
                     present[1][:, past_position:],
@@ -397,10 +413,8 @@ class ComposerMPTCausalLM(OriginalComposerMPTCausalLM):
         return MPTForCausalLM
 
 
-llmfoundry.models.layers.attention.GroupedQueryAttention.forward = forward
-llmfoundry.models.layers.attention.GroupedQueryAttention.matryoshka_key_value = (
-    matryoshka_key_value
-)
+llmfoundry.models.layers.attention.GroupedQueryAttention = GroupedQueryAttention
+llmfoundry.layers_registry.attention_classes.register_class("grouped_query_attention", GroupedQueryAttention)
 llmfoundry.registry.models.register("mpt_causal_lm", func=ComposerMPTCausalLM)
 
 
