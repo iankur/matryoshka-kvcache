@@ -3,15 +3,16 @@ import warnings
 from typing import Any, Optional
 
 import llmfoundry
+
 import torch
 import torch.nn as nn
-
+from einops import rearrange
 from llmfoundry.layers_registry import attention_classes
 from llmfoundry.models.layers.attention import (
     gen_slopes,
     GroupedQueryAttention as OriginalGroupedQueryAttention,
 )
-from llmfoundry.models.layers.layer_builders import build_fc
+from llmfoundry.models.layers.layer_builders import build_fc, build_norm
 from llmfoundry.models.mpt import (
     ComposerMPTCausalLM as OriginalComposerMPTCausalLM,
     MPTConfig as OriginalMPTConfig,
@@ -23,7 +24,6 @@ from llmfoundry.models.mpt.modeling_mpt import (
     gen_flash_attn_padding_info,
 )
 from llmfoundry.models.utils.config_defaults import fc_type_defaults
-
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 
@@ -113,6 +113,24 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
             ]
             self.Wqkv._fused = (0, fuse_splits)
 
+            if self.qk_ln or self.qk_gn:
+                norm_size = self.head_dim if qk_gn else d_model
+                self.q_ln = build_norm(
+                    name=norm_type.lower(),
+                    normalized_shape=norm_size,
+                    eps=norm_eps,
+                    device=device,
+                )
+                if self.reuse_kv_layer_idx is None:
+                    if qk_ln:
+                        norm_size = self.head_dim * kv_n_heads // self.matryoshka_factor
+                    self.k_ln = build_norm(
+                        name=norm_type.lower(),
+                        normalized_shape=norm_size,
+                        eps=norm_eps,
+                        device=device,
+                    )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -177,13 +195,96 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
 
         return self.out_proj(context), attn_weights, past_key_value
 
+    def get_qkv(
+        self,
+        x: torch.Tensor,
+        prev_layer_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        key_value_states: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Computes and returns the query, key, and value tensors.
+
+        Args:
+            x (torch.Tensor): The input query tensor.
+            prev_layer_key_value  (Optional[Tuple[torch.Tensor, torch.Tensor]]): The key value of the previous layer.
+            key_value_states (Optional[torch.Tensor]): The input tensor for keys and values.
+
+        Returns:
+            query (torch.Tensor): The query tensor.
+            key (torch.Tensor): The key tensor.
+            value (torch.Tensor): The value tensor.
+        """
+        if self.reuse_kv_layer_idx is not None:
+            if prev_layer_key_value is None:
+                raise ValueError(
+                    "prev_layer_key_value is None, cannot reuse_prev_layer_kv.",
+                )
+            key, value = prev_layer_key_value
+            if self.attn_impl == "torch":
+                key = rearrange(key, "b h d s -> b s (h d)")
+                value = rearrange(value, "b h s d -> b s (h d)")
+
+            query = self.Wq(x)
+            if self.clip_qkv:
+                query = query.clamp(min=-self.clip_qkv, max=self.clip_qkv)
+
+            if self.qk_ln or self.qk_gn:
+                # Applying layernorm to qk
+                q_shape = query.shape
+                if self.qk_gn:
+                    b, s = query.shape[:2]
+                    query = query.view(b, s, self.n_heads, -1)
+                dtype = query.dtype
+                query = self.q_ln(query).to(dtype).view(q_shape)
+            return query, key, value
+
+        if self.fused_qkv:
+            if key_value_states is not None:
+                raise ValueError(
+                    "Cannot use separate hidden and key_value states when fused_qkv = True.",
+                )
+            qkv = self.Wqkv(x)
+
+            if self.clip_qkv:
+                qkv = qkv.clamp(min=-self.clip_qkv, max=self.clip_qkv)
+
+            query, key, value = qkv.split(
+                [
+                    self.d_model,
+                    self.kv_n_heads * self.head_dim // self.matryoshka_factor,
+                    self.kv_n_heads * self.head_dim // self.matryoshka_factor,
+                ],
+                dim=2,
+            )
+
+        if self.qk_ln or self.qk_gn:
+            # Applying layernorm to qk
+            q_shape, k_shape = query.shape, key.shape
+            if self.qk_gn:
+                b, s = query.shape[:2]
+                query = query.view(b, s, self.n_heads, -1)
+                key = key.view(b, s, self.kv_n_heads, -1)
+            dtype = query.dtype
+            query = self.q_ln(query).to(dtype).view(q_shape)
+            key = self.k_ln(key).to(dtype).view(k_shape)
+
+        # hack: repeat key and value for subsequent positional encoding
+        if self.matryoshka_factor > 1:
+            b, s = key.shape[:2]
+            key = key.view(b, s, self.kv_n_heads, -1).repeat(
+                1, 1, 1, self.matryoshka_factor
+            )
+            key = key.reshape(b, s, -1)
+            value = value.view(b, s, self.kv_n_heads, -1).repeat(
+                1, 1, 1, self.matryoshka_factor
+            )
+            value = value.reshape(b, s, -1)
+
+        return query, key, value
+
     def matryoshka_key_value(self, key, value, prev_layer_key_value):
         """
-        Overwrite key and value with previous key and value
-        after positional encoding has been applied. Take the
-        first `matryoshka_dim` dimensions of the concatenated
-        key and value to be the new key and value. It adds two
-        new parameters `matryoshka_factor` and `block_idx`
+        Overwrite first (last) few dims of previous key and value with
+        current key and value if matryoshka_ascending is true (false).
         """
         assert len(key.shape) == 3
         bsz, seqlen = key.shape[:2]
@@ -198,15 +299,15 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
 
         key = key.reshape(-1, self.head_dim)
         if self.matryoshka_ascending:
-            prev_key[:, :matryoshka_dim] = key
+            prev_key[:, :matryoshka_dim] = key[:, :matryoshka_dim]
         else:
-            prev_key[:, -matryoshka_dim:] = key
+            prev_key[:, -matryoshka_dim:] = key[:, -matryoshka_dim:]
 
         value = value.reshape(-1, self.head_dim)
         if self.matryoshka_ascending:
-            prev_value[:, :matryoshka_dim] = value
+            prev_value[:, :matryoshka_dim] = value[:, :matryoshka_dim]
         else:
-            prev_value[:, -matryoshka_dim:] = value
+            prev_value[:, -matryoshka_dim:] = value[:, -matryoshka_dim:]
 
         key = prev_key.reshape(bsz, seqlen, -1)
         value = prev_value.reshape(bsz, seqlen, -1)
@@ -240,6 +341,7 @@ class MultiheadAttention(GroupedQueryAttention):
         reuse_kv_layer_idx: Optional[int] = None,
         attn_logit_softcapping: Optional[float] = None,
         kv_dim: Optional[int] = None,
+        **kwargs,
     ):
         super().__init__(
             d_model=d_model,
@@ -261,6 +363,7 @@ class MultiheadAttention(GroupedQueryAttention):
             reuse_kv_layer_idx=reuse_kv_layer_idx,
             attn_logit_softcapping=attn_logit_softcapping,
             kv_dim=kv_dim,
+            **kwargs,
         )
 
 
@@ -286,6 +389,7 @@ class MultiQueryAttention(GroupedQueryAttention):
         reuse_kv_layer_idx: Optional[int] = None,
         attn_logit_softcapping: Optional[float] = None,
         kv_dim: Optional[int] = None,
+        **kwargs,
     ):
         super().__init__(
             d_model=d_model,
@@ -307,6 +411,7 @@ class MultiQueryAttention(GroupedQueryAttention):
             reuse_kv_layer_idx=reuse_kv_layer_idx,
             attn_logit_softcapping=attn_logit_softcapping,
             kv_dim=kv_dim,
+            **kwargs,
         )
 
 
