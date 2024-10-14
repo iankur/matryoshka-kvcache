@@ -29,7 +29,6 @@ variables:
       repeat: 3
 
     # matryoshka
-    use_cache: True
     matryoshka_ascending: True
     mkv:
       order:
@@ -43,13 +42,13 @@ variables:
     mkv_cla:
       order:
         - name: matryoshka_layer1
-        - name: reuse_kv_layer
+        - name: reuse_matryoshka_kv_layer
         - name: matryoshka_layer2
-        - name: reuse_kv_layer
+        - name: reuse_matryoshka_kv_layer
         - name: matryoshka_layer4
-        - name: reuse_kv_layer
+        - name: reuse_matryoshka_kv_layer
         - name: matryoshka_layer8
-        - name: reuse_kv_layer
+        - name: reuse_matryoshka_kv_layer
       repeat: 3
 
 max_seq_len: ${variables.max_seq_len}
@@ -69,13 +68,15 @@ model:
     attn_impl: flash
     rope: True
 
-  use_cache: ${variables.order.use_cache}
-
   block_overrides:
     overrides:
       reuse_kv_layer:
         attn_config:
           reuse_kv_layer_idx: -1
+      reuse_matryoshka_kv_layer:
+        attn_config:
+          reuse_kv_layer_idx: -1
+        allow_mismatch: true
       matryoshka_layer1:
         attn_config:
           matryoshka_factor: 1
@@ -97,7 +98,7 @@ model:
       # - ${variables.order.cla2}
       # - ${variables.order.cla4}
       - ${variables.order.mkv}
-      # - ${variables.order.mkv_cla},
+      # - ${variables.order.mkv_cla}
 
 # Tokenizer
 tokenizer:

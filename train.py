@@ -37,6 +37,7 @@ class MPTConfig(OriginalMPTConfig):
                 "matryoshka_factor": 1,
                 "matryoshka_ascending": True,
             },
+            "allow_mismatch": True,
         }
 
 
@@ -417,6 +418,18 @@ class MultiQueryAttention(GroupedQueryAttention):
 
 class MPTModel(OriginalMPTModel):
     config_class = MPTConfig
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        for b_idx, block in enumerate(self.blocks):
+            attn_block = (
+                block.norm_attn_norm.attn
+                if self.blocks_fuse_norm_attn_norm
+                else block.attn
+            )
+            if attn_block.matryoshka_factor > 1:
+                self.kv_cache_layers.add(b_idx - 1)
 
     def forward(
         self,
