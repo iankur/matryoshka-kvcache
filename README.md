@@ -6,16 +6,17 @@ The code uses training setup from MosaicML LLMFoundry, which can be found [here]
 
 ### Installation
 ```
-git clone https://github.com/mosaicml/llm-foundry.git
-cd llm-foundry
-
 # Creating and activate a virtual environment
 python3 -m venv llmfoundry-venv
 source llmfoundry-venv/bin/activate
 
 pip install cmake packaging torch wheel  # setup.py requires these be installed
 
+git clone https://github.com/mosaicml/llm-foundry.git
+cd llm-foundry
+
 pip install -e ".[gpu]"  # or `pip install -e .` if no NVIDIA GPU.
+cd ..
 ```
 
 Clone this repository outside of llm-foundry

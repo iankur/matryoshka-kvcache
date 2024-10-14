@@ -1,19 +1,22 @@
 import copy
 import warnings
-from typing import Optional, Any
+from typing import Any, Optional
 
 import llmfoundry
 import torch
 import torch.nn as nn
 
 from llmfoundry.layers_registry import attention_classes
-from llmfoundry.models.layers.attention import gen_slopes, GroupedQueryAttention as OriginalGroupedQueryAttention
+from llmfoundry.models.layers.attention import (
+    gen_slopes,
+    GroupedQueryAttention as OriginalGroupedQueryAttention,
+)
 from llmfoundry.models.layers.layer_builders import build_fc
 from llmfoundry.models.mpt import (
     ComposerMPTCausalLM as OriginalComposerMPTCausalLM,
+    MPTConfig as OriginalMPTConfig,
     MPTForCausalLM as OriginalMPTForCausalLM,
     MPTModel as OriginalMPTModel,
-    MPTConfig as OriginalMPTConfig,
 )
 from llmfoundry.models.mpt.modeling_mpt import (
     gen_attention_mask_in_length,
@@ -28,13 +31,14 @@ class MPTConfig(OriginalMPTConfig):
     @property
     def allowed_block_overrides(self):
         return {
-            'attn_config': {
-                'sliding_window_size': None,
-                'reuse_kv_layer_idx': None,
-                'matryoshka_factor': 1,
+            "attn_config": {
+                "sliding_window_size": None,
+                "reuse_kv_layer_idx": None,
+                "matryoshka_factor": 1,
+                "matryoshka_ascending": True,
             },
         }
-llmfoundry.models.mpt.MPTConfig = MPTConfig
+
 
 @attention_classes.register_class("grouped_query_attention")
 class GroupedQueryAttention(OriginalGroupedQueryAttention):
@@ -43,14 +47,14 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
         d_model: int,
         n_heads: int,
         kv_n_heads: int,
-        attn_impl: str = 'flash',
+        attn_impl: str = "flash",
         clip_qkv: Optional[float] = None,
         qk_ln: bool = False,
         qk_gn: bool = False,
         fused_qkv: bool = True,
         softmax_scale: Optional[float] = None,
         attn_pdrop: float = 0.0,
-        norm_type: str = 'low_precision_layernorm',
+        norm_type: str = "low_precision_layernorm",
         norm_eps: float = 1e-05,
         fc_type: Optional[dict[str, Any]] = None,
         device: Optional[str] = None,
@@ -62,46 +66,49 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
         **kwargs,
     ):
         self.matryoshka_factor = kwargs.pop("matryoshka_factor", 1)
+        self.matryoshka_ascending = kwargs.pop("matryoshka_ascending", True)
         super().__init__(
-        d_model=d_model,
-        n_heads=n_heads,
-        kv_n_heads=kv_n_heads,
-        attn_impl=attn_impl,
-        clip_qkv=clip_qkv,
-        qk_ln=qk_ln,
-        qk_gn=qk_gn,
-        fused_qkv=fused_qkv,
-        softmax_scale=softmax_scale,
-        attn_pdrop=attn_pdrop,
-        norm_type=norm_type,
-        norm_eps=norm_eps,
-        fc_type=fc_type,
-        device=device,
-        bias=bias,
-        sliding_window_size=sliding_window_size,
-        reuse_kv_layer_idx=reuse_kv_layer_idx,
-        attn_logit_softcapping=attn_logit_softcapping,
-        kv_dim=kv_dim,
+            d_model=d_model,
+            n_heads=n_heads,
+            kv_n_heads=kv_n_heads,
+            attn_impl=attn_impl,
+            clip_qkv=clip_qkv,
+            qk_ln=qk_ln,
+            qk_gn=qk_gn,
+            fused_qkv=fused_qkv,
+            softmax_scale=softmax_scale,
+            attn_pdrop=attn_pdrop,
+            norm_type=norm_type,
+            norm_eps=norm_eps,
+            fc_type=fc_type,
+            device=device,
+            bias=bias,
+            sliding_window_size=sliding_window_size,
+            reuse_kv_layer_idx=reuse_kv_layer_idx,
+            attn_logit_softcapping=attn_logit_softcapping,
+            kv_dim=kv_dim,
         )
 
         # Usually, fc_type dict should be passed in through MPTBlock's __init__ function.
         if fc_type is None:
             fc_type = copy.deepcopy(fc_type_defaults)
-            fc_type['bias'] = kwargs.get('bias', True)
-            fc_type['device'] = kwargs.get('device', None)
-        fc_type_name = fc_type['name']
+            fc_type["bias"] = kwargs.get("bias", True)
+            fc_type["device"] = kwargs.get("device", None)
+        fc_type_name = fc_type["name"]
 
         if self.matryoshka_factor > 1:
             assert self.fused_qkv, "Fused qkv must be enabled"
             self.Wqkv = build_fc(
                 name=fc_type_name,
                 in_features=self.d_model,
-                out_features=self.d_model + 2 * self.kv_n_heads * self.head_dim // self.matryoshka_factor,
+                out_features=self.d_model
+                + 2 * self.kv_n_heads * self.head_dim // self.matryoshka_factor,
                 fc_kwargs=fc_type,
             )
             # for param init fn; enables shape based init of fused layers
             fuse_splits = [i * self.head_dim for i in range(1, self.n_heads + 1)] + [
-                self.n_heads * self.head_dim + i * self.head_dim // self.matryoshka_factor
+                self.n_heads * self.head_dim
+                + i * self.head_dim // self.matryoshka_factor
                 for i in range(1, 2 * self.kv_n_heads)
             ]
             self.Wqkv._fused = (0, fuse_splits)
@@ -120,7 +127,9 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
         prev_layer_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         key_value_states: Optional[torch.Tensor] = None,
     ) -> tuple[
-        torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor, torch.Tensor]]
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[tuple[torch.Tensor, torch.Tensor]],
     ]:
         extra_kwargs = {}
         if prev_layer_key_value is not None:
@@ -170,7 +179,7 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
 
     def matryoshka_key_value(self, key, value, prev_layer_key_value):
         """
-        Concatenate key and value with previous key and value
+        Overwrite key and value with previous key and value
         after positional encoding has been applied. Take the
         first `matryoshka_dim` dimensions of the concatenated
         key and value to be the new key and value. It adds two
@@ -188,19 +197,23 @@ class GroupedQueryAttention(OriginalGroupedQueryAttention):
         prev_value = prev_value.reshape(-1, self.head_dim)
 
         key = key.reshape(-1, self.head_dim)
-        key = key[..., :matryoshka_dim]
+        if self.matryoshka_ascending:
+            prev_key[:, :matryoshka_dim] = key
+        else:
+            prev_key[:, -matryoshka_dim:] = key
 
         value = value.reshape(-1, self.head_dim)
-        value = value[..., :matryoshka_dim]
+        if self.matryoshka_ascending:
+            prev_value[:, :matryoshka_dim] = value
+        else:
+            prev_value[:, -matryoshka_dim:] = value
 
-        key = torch.cat([key, prev_key], dim=-1)
-        value = torch.cat([value, prev_value], dim=-1)
-
-        key = key[..., : self.head_dim].reshape(bsz, seqlen, -1)
-        value = value[..., : self.head_dim].reshape(bsz, seqlen, -1)
+        key = prev_key.reshape(bsz, seqlen, -1)
+        value = prev_value.reshape(bsz, seqlen, -1)
         return key, value
 
-@attention_classes.register_class('multihead_attention')
+
+@attention_classes.register_class("multihead_attention")
 class MultiheadAttention(GroupedQueryAttention):
     """Multi-head self attention.
 
@@ -211,14 +224,14 @@ class MultiheadAttention(GroupedQueryAttention):
         self,
         d_model: int,
         n_heads: int,
-        attn_impl: str = 'flash',
+        attn_impl: str = "flash",
         clip_qkv: Optional[float] = None,
         qk_ln: bool = False,
         qk_gn: bool = False,
         fused_qkv: bool = True,
         softmax_scale: Optional[float] = None,
         attn_pdrop: float = 0.0,
-        norm_type: str = 'low_precision_layernorm',
+        norm_type: str = "low_precision_layernorm",
         norm_eps: float = 1e-05,
         fc_type: Optional[dict[str, Any]] = None,
         device: Optional[str] = None,
@@ -250,20 +263,21 @@ class MultiheadAttention(GroupedQueryAttention):
             kv_dim=kv_dim,
         )
 
-@attention_classes.register_class('multiquery_attention')
+
+@attention_classes.register_class("multiquery_attention")
 class MultiQueryAttention(GroupedQueryAttention):
     def __init__(
         self,
         d_model: int,
         n_heads: int,
-        attn_impl: str = 'flash',
+        attn_impl: str = "flash",
         clip_qkv: Optional[float] = None,
         qk_ln: bool = False,
         qk_gn: bool = False,
         fused_qkv: bool = True,
         softmax_scale: Optional[float] = None,
         attn_pdrop: float = 0.0,
-        norm_type: str = 'low_precision_layernorm',
+        norm_type: str = "low_precision_layernorm",
         norm_eps: float = 1e-05,
         fc_type: Optional[dict[str, Any]] = None,
         device: Optional[str] = None,
@@ -295,7 +309,10 @@ class MultiQueryAttention(GroupedQueryAttention):
             kv_dim=kv_dim,
         )
 
+
 class MPTModel(OriginalMPTModel):
+    config_class = MPTConfig
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -563,9 +580,11 @@ class ComposerMPTCausalLM(OriginalComposerMPTCausalLM):
     def model_class(self) -> type[OriginalMPTForCausalLM]:
         return MPTForCausalLM
 
+    @property
+    def config_class(self) -> type[OriginalMPTConfig]:
+        return MPTConfig
 
-llmfoundry.models.layers.attention.GroupedQueryAttention = GroupedQueryAttention
-# llmfoundry.layers_registry.attention_classes.register_class("grouped_query_attention", GroupedQueryAttention)
+
 llmfoundry.registry.models.register("mpt_causal_lm", func=ComposerMPTCausalLM)
 
 

@@ -30,6 +30,7 @@ variables:
 
     # matryoshka
     use_cache: True
+    matryoshka_ascending: True
     mkv:
       order:
         - name: matryoshka_layer1
@@ -39,10 +40,17 @@ variables:
       repeat: 3
 
     # matryoshka with cross layer attention (2 shared layers)
-    mkv_cla: {order: [{name: matryoshka_layer1}, {name: reuse_kv_layer},
-               {name: matryoshka_layer2}, {name: reuse_kv_layer},
-               {name: matryoshka_layer4}, {name: reuse_kv_layer},
-               {name: matryoshka_layer8}, {name: reuse_kv_layer}], repeat: 3}
+    mkv_cla:
+      order:
+        - name: matryoshka_layer1
+        - name: reuse_kv_layer
+        - name: matryoshka_layer2
+        - name: reuse_kv_layer
+        - name: matryoshka_layer4
+        - name: reuse_kv_layer
+        - name: matryoshka_layer8
+        - name: reuse_kv_layer
+      repeat: 3
 
 max_seq_len: ${variables.max_seq_len}
 run_name: ${variables.run_name}
@@ -71,21 +79,25 @@ model:
       matryoshka_layer1:
         attn_config:
           matryoshka_factor: 1
+          matryoshka_ascending: ${variables.order.matryoshka_ascending}
       matryoshka_layer2:
         attn_config:
           matryoshka_factor: 2
+          matryoshka_ascending: ${variables.order.matryoshka_ascending}
       matryoshka_layer4:
         attn_config:
           matryoshka_factor: 4
+          matryoshka_ascending: ${variables.order.matryoshka_ascending}
       matryoshka_layer8:
         attn_config:
           matryoshka_factor: 8
+          matryoshka_ascending: ${variables.order.matryoshka_ascending}
     order:
       # - ${variables.order.standard}
       # - ${variables.order.cla2}
       # - ${variables.order.cla4}
       - ${variables.order.mkv}
-      # ${variables.order.mkv_cla},
+      # - ${variables.order.mkv_cla},
 
 # Tokenizer
 tokenizer:
