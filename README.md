@@ -1,8 +1,10 @@
 # matryoshka-kvcache
 Matryoshka KV cache for reduced cache size in large language model
 
+![matryoshka kv cache](./assets/matryoshka%20kv%20cache.png)
+
 ## Set up
-The code uses training setup from MosaicML LLMFoundry, which can be found [here](https://github.com/mosaicml/llm-foundry/tree/main/scripts/train).
+The code uses training setup from MosaicML LLM Foundry, which can be found [here](https://github.com/mosaicml/llm-foundry/tree/main/scripts/train).
 
 ### Installation
 ```
@@ -34,3 +36,8 @@ python ../llm-foundry/scripts/data_prep/convert_dataset_hf.py --dataset allenai/
 ```
 composer train.py yamls/mpt-125m.yaml train_loader.dataset.split=train_small eval_loader.dataset.split=val_small
 ```
+
+![loss curve](./assets/loss.png)
+
+### Acknowledgements
+- [MosaicML LLM Foundry](https://github.com/mosaicml/llm-foundry)
