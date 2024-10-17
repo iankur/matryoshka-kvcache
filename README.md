@@ -3,6 +3,8 @@ Matryoshka KV cache for reduced cache size in large language model
 
 ![matryoshka kv cache](./assets/matryoshka%20kv%20cache.png)
 
+Different color indicates values created at different time (corresponding to respective layer/block execution).
+
 ## Set up
 The code uses training setup from MosaicML LLM Foundry, which can be found [here](https://github.com/mosaicml/llm-foundry/tree/main/scripts/train).
 
